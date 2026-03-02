@@ -3,8 +3,10 @@ client/message_reader.py — Verify Signature → Unwrap Keys → Decrypt → Re
 
 This is the full receiver-side pipeline.
 """
-
 import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -37,9 +39,9 @@ def read_encrypted_message(
     payload = canonical_bytes(message, exclude_signature=True)
     try:
         verify_signature(payload, signature, sender_public_key)
-        print("[✓] Signature verified — message is authentic and untampered.")
+        print("[OK] Signature verified -- message is authentic and untampered.")
     except InvalidSignature:
-        print("[✗] SIGNATURE VERIFICATION FAILED — Message may have been tampered with!")
+        print("[FAIL] SIGNATURE VERIFICATION FAILED -- Message may have been tampered with!")
         raise
 
     # ── 2. Parse (decode base64 fields back to bytes) ────────────────────────
@@ -78,5 +80,7 @@ def read_encrypted_message(
 
     # ── 5. Reconstruct message in sequence order ─────────────────────────────
     plaintext_parts.sort(key=lambda x: x[0])
-    reconstructed = " ".join(text for _, text in plaintext_parts)
+    # Join with empty string — component values include surrounding whitespace
+    # from character-offset slicing, so no separator is needed.
+    reconstructed = "".join(text for _, text in plaintext_parts).strip()
     return reconstructed

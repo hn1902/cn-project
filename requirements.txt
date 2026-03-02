@@ -1,1 +1,3 @@
 cryptography>=42.0.0
+spacy>=3.7.0
+# After installing: python -m spacy download en_core_web_sm

@@ -17,6 +17,9 @@ import argparse
 import threading
 from pathlib import Path
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crypto.keys import (
@@ -134,10 +137,10 @@ class SecureClient:
                 ftype = frame.get("type", "")
 
                 if ftype == "ACK":
-                    print(f"[✓] {frame.get('info', '')}")
+                    print(f"[OK] {frame.get('info', '')}")
 
                 elif ftype == "ERROR":
-                    print(f"[✗] Server error: {frame.get('info', '')}")
+                    print(f"[!] Server error: {frame.get('info', '')}")
 
                 elif ftype == "KEY_RESPONSE":
                     uname = frame["username"]
@@ -236,7 +239,7 @@ class SecureClient:
             print(f"\n  ► Reconstructed message: {plaintext!r}")
             print(f"{'='*65}\n")
         except InvalidSignature:
-            print("  [SECURITY] Message REJECTED — invalid signature!")
+            print("  [SECURITY] Message REJECTED -- invalid signature!")
             print(f"{'='*65}\n")
         except Exception as exc:
             print(f"  [ERROR] Decryption failed: {exc}")

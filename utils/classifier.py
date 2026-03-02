@@ -1,18 +1,40 @@
 """
-utils/classifier.py — Rule-based component classifier.
+utils/classifier.py — spaCy NER-based component classifier.
 
-Splits a message string into labelled spans (components) using regex + heuristics.
-No external NLP libraries required.
+Uses spaCy's pre-trained 'en_core_web_sm' model (Named Entity Recognition)
+to classify message spans into: name / number / id / text.
 
-Component types (sensitivity ordering, highest first):
-  id      — long digit sequences (e.g., SSN, account number, 8+ digits)
-  number  — currency values or plain numbers (floats, ints, currency)
-  name    — a single capitalised word standing alone
-  text    — everything else (fallback / highest catch-all sensitivity)
+spaCy entity labels → component types:
+  PERSON, ORG, GPE, LOC, FAC, NORP   → name
+  MONEY, PERCENT, QUANTITY, ORDINAL   → number
+  CARDINAL with 8+ digits             → id
+  CARDINAL (shorter)                  → number
+  DATE, TIME                          → text  (fallback, not sensitive enough for own key)
+  Everything else / non-entities      → text
+
+Fallback: if spaCy is unavailable, falls back to the original regex classifier.
 """
 
-import re
 from dataclasses import dataclass
+
+# spaCy NER label → component type mapping
+_NER_TO_TYPE: dict[str, str] = {
+    "PERSON":   "name",
+    "ORG":      "name",
+    "GPE":      "name",   # geo-political entity (cities, countries)
+    "LOC":      "name",
+    "FAC":      "name",   # facilities (airports, buildings)
+    "NORP":     "name",   # nationalities, groups
+    "MONEY":    "number",
+    "PERCENT":  "number",
+    "QUANTITY": "number",
+    "ORDINAL":  "number",
+    "DATE":     "text",
+    "TIME":     "text",
+    "EVENT":    "text",
+    "WORK_OF_ART": "text",
+    "LANGUAGE": "text",
+}
 
 
 @dataclass
@@ -22,60 +44,91 @@ class Component:
     value: str
 
 
-# ── Regex patterns (order matters: most specific first) ───────────────────────
+def _load_spacy():
+    """Load spaCy model, raise ImportError if not installed."""
+    import spacy  # noqa: PLC0415
+    try:
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        raise OSError(
+            "spaCy model not found. Run: python -m spacy download en_core_web_sm"
+        )
 
-# 8+ consecutive digits → ID  (SSN without dashes, account numbers, etc.)
-_ID_RE = re.compile(r'\b\d{8,}\b')
 
-# Currency: optional $ or leading digits with decimal and optional currency symbol
-_CURRENCY_RE = re.compile(r'\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*\.\d+\b|\b\d{1,7}\b')
-
-# Single capitalised word (Name): starts with uppercase, rest lowercase, 2+ chars
-_NAME_RE = re.compile(r'\b[A-Z][a-z]{1,}\b')
-
-
-def _classify_token(token: str) -> str:
-    """Return the type label for a single whitespace-delimited token."""
-    stripped = token.strip(".,;:!?\"'()")
-    if _ID_RE.fullmatch(stripped):
-        return "id"
-    if _CURRENCY_RE.fullmatch(stripped):
-        return "number"
-    if _NAME_RE.fullmatch(stripped):
-        return "name"
-    return "text"
+def _type_for_cardinal(text: str) -> str:
+    """For CARDINAL entities: 8+ consecutive digits → id, otherwise → number."""
+    import re
+    digits_only = re.sub(r"[^0-9]", "", text)
+    return "id" if len(digits_only) >= 8 else "number"
 
 
 def classify_message(text: str) -> list[Component]:
     """
-    Split *text* into components.  Adjacent tokens of the same type are merged
-    into one span so the message isn't over-fragmented.
+    Classify *text* into typed components using spaCy NER.
 
-    Returns a list of Component objects in order.
+    Approach:
+      1. Run spaCy NER over the full text.
+      2. Named entities get their type from _NER_TO_TYPE mapping.
+      3. Non-entity text between entities is classified as 'text'.
+      4. Adjacent same-type spans are merged.
     """
-    tokens = text.split()
-    if not tokens:
+    if not text.strip():
         return []
 
+    nlp = _load_spacy()
+    doc = nlp(text)
+
+    # Build list of (start_char, end_char, type) for all regions
+    entity_spans: list[tuple[int, int, str]] = []
+
+    for ent in doc.ents:
+        if ent.label_ == "CARDINAL":
+            comp_type = _type_for_cardinal(ent.text)
+        else:
+            comp_type = _NER_TO_TYPE.get(ent.label_, "text")
+        entity_spans.append((ent.start_char, ent.end_char, comp_type))
+
+    # Sort entities by position
+    entity_spans.sort(key=lambda x: x[0])
+
+    # Fill gaps between entities as 'text'
+    all_spans: list[tuple[int, int, str]] = []
+    prev_end = 0
+
+    for start, end, comp_type in entity_spans:
+        if start > prev_end:
+            gap_text = text[prev_end:start]
+            if gap_text.strip():
+                all_spans.append((prev_end, start, "text"))
+        all_spans.append((start, end, comp_type))
+        prev_end = end
+
+    # Trailing gap
+    if prev_end < len(text) and text[prev_end:].strip():
+        all_spans.append((prev_end, len(text), "text"))
+
+    if not all_spans:
+        return [Component(seq=1, type="text", value=text.strip())]
+
+    # Merge adjacent same-type spans, preserving the original text slice
     components: list[Component] = []
     seq = 1
+    cur_type = all_spans[0][2]
+    cur_start = all_spans[0][0]
+    cur_end = all_spans[0][1]
 
-    current_type = _classify_token(tokens[0])
-    current_tokens = [tokens[0]]
-
-    for token in tokens[1:]:
-        t = _classify_token(token)
-        if t == current_type:
-            current_tokens.append(token)
+    for start, end, span_type in all_spans[1:]:
+        if span_type == cur_type:
+            cur_end = end  # extend the current span
         else:
-            components.append(Component(seq=seq, type=current_type, value=" ".join(current_tokens)))
+            # Keep raw slice including surrounding whitespace for exact reconstruction
+            components.append(Component(seq=seq, type=cur_type, value=text[cur_start:cur_end]))
             seq += 1
-            current_type = t
-            current_tokens = [token]
+            cur_type = span_type
+            cur_start = start
+            cur_end = end
 
-    # flush the last group
-    components.append(Component(seq=seq, type=current_type, value=" ".join(current_tokens)))
-
+    components.append(Component(seq=seq, type=cur_type, value=text[cur_start:cur_end]))
     return components
 
 
