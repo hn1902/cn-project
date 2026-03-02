@@ -15,6 +15,7 @@ spaCy entity labels → component types:
 Fallback: if spaCy is unavailable, falls back to the original regex classifier.
 """
 
+import re
 from dataclasses import dataclass
 
 # spaCy NER label → component type mapping
@@ -44,11 +45,18 @@ class Component:
     value: str
 
 
+_nlp = None  # cached model — load once, reuse forever
+
+
 def _load_spacy():
-    """Load spaCy model, raise ImportError if not installed."""
+    """Load spaCy model on first call, return cached instance afterwards."""
+    global _nlp
+    if _nlp is not None:
+        return _nlp
     import spacy  # noqa: PLC0415
     try:
-        return spacy.load("en_core_web_sm")
+        _nlp = spacy.load("en_core_web_sm")
+        return _nlp
     except OSError:
         raise OSError(
             "spaCy model not found. Run: python -m spacy download en_core_web_sm"
@@ -56,10 +64,48 @@ def _load_spacy():
 
 
 def _type_for_cardinal(text: str) -> str:
-    """For CARDINAL entities: 8+ consecutive digits → id, otherwise → number."""
-    import re
+    """For CARDINAL entities: 8+ consecutive digits -> id, otherwise -> number."""
     digits_only = re.sub(r"[^0-9]", "", text)
     return "id" if len(digits_only) >= 8 else "number"
+
+
+# ── Regex rules for gap sub-classification ────────────────────────────────────
+# Applied inside text gaps that spaCy didn't tag as a named entity.
+
+_RE_ID       = re.compile(r'\b\d{8,}\b')          # 8+ consecutive digits
+_RE_NUMBER   = re.compile(r'\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*\.\d+\b|\b\d{1,7}\b')
+_RE_NAME     = re.compile(r'\b[A-Z][a-z]{1,}\b')  # Single capitalised word
+
+
+def _classify_token(token: str) -> str:
+    """Classify a single stripped token using regex rules."""
+    stripped = token.strip(".,;:!?\"'()")
+    if _RE_ID.fullmatch(stripped):     return "id"
+    if _RE_NUMBER.fullmatch(stripped): return "number"
+    if _RE_NAME.fullmatch(stripped):   return "name"
+    return "text"
+
+
+def _classify_gap(original_text: str, gap_start: int, gap_end: int) -> list[tuple[int, int, str]]:
+    """
+    Sub-classify a gap (text region not covered by a spaCy entity) using
+    the regex rules.  This catches long digit sequences, currency values,
+    and capitalised names that spaCy's small model may miss.
+
+    Returns a list of (start_char, end_char, type) tuples.
+    """
+    result: list[tuple[int, int, str]] = []
+    # Split into alternating whitespace / non-whitespace segments
+    for match in re.finditer(r'(\s+|\S+)', original_text[gap_start:gap_end]):
+        seg_start = gap_start + match.start()
+        seg_end   = gap_start + match.end()
+        segment   = match.group()
+        if segment.strip():
+            comp_type = _classify_token(segment)
+        else:
+            comp_type = "text"   # pure whitespace → text
+        result.append((seg_start, seg_end, comp_type))
+    return result
 
 
 def classify_message(text: str) -> list[Component]:
@@ -86,26 +132,31 @@ def classify_message(text: str) -> list[Component]:
             comp_type = _type_for_cardinal(ent.text)
         else:
             comp_type = _NER_TO_TYPE.get(ent.label_, "text")
-        entity_spans.append((ent.start_char, ent.end_char, comp_type))
+
+        # Only use spaCy's entity if it maps to a non-text type.
+        # Entities that map to 'text' (DATE, TIME, LANGUAGE, etc.) are
+        # skipped so the regex gap-filler can re-classify them correctly.
+        # This handles the case where spaCy mislabels a digit sequence as DATE.
+        if comp_type != "text":
+            entity_spans.append((ent.start_char, ent.end_char, comp_type))
 
     # Sort entities by position
     entity_spans.sort(key=lambda x: x[0])
 
-    # Fill gaps between entities as 'text'
+    # Fill gaps between entities — sub-classify with regex (hybrid mode)
     all_spans: list[tuple[int, int, str]] = []
     prev_end = 0
 
     for start, end, comp_type in entity_spans:
         if start > prev_end:
-            gap_text = text[prev_end:start]
-            if gap_text.strip():
-                all_spans.append((prev_end, start, "text"))
+            # Sub-classify the gap with regex to catch IDs/numbers spaCy missed
+            all_spans.extend(_classify_gap(text, prev_end, start))
         all_spans.append((start, end, comp_type))
         prev_end = end
 
     # Trailing gap
-    if prev_end < len(text) and text[prev_end:].strip():
-        all_spans.append((prev_end, len(text), "text"))
+    if prev_end < len(text):
+        all_spans.extend(_classify_gap(text, prev_end, len(text)))
 
     if not all_spans:
         return [Component(seq=1, type="text", value=text.strip())]
