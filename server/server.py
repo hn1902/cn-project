@@ -72,11 +72,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             if ftype == "REGISTER":
                 uname = frame.get("username", "").strip()
                 pub_pem = frame.get("public_key_pem", "")
+                x25519_pub_pem = frame.get("x25519_public_key_pem", "")
                 if not uname or not pub_pem:
                     await send_frame(writer, {"type": "ERROR", "info": "Missing fields"})
                     continue
 
-                ok = await store.register(uname, pub_pem)
+                ok = await store.register(uname, pub_pem, x25519_pub_pem)
                 if ok:
                     username = uname
                     async with _writers_lock:
@@ -90,11 +91,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             elif ftype == "GET_KEY":
                 target = frame.get("username", "")
                 pub_pem = await store.get_public_key(target)
+                x25519_pub_pem = await store.get_x25519_public_key(target)
                 if pub_pem:
                     await send_frame(writer, {
                         "type": "KEY_RESPONSE",
                         "username": target,
                         "public_key_pem": pub_pem,
+                        "x25519_public_key_pem": x25519_pub_pem or "",
                     })
                 else:
                     await send_frame(writer, {"type": "ERROR", "info": f"User '{target}' not found"})

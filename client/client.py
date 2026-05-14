@@ -8,6 +8,12 @@ Commands (at the prompt):
     send <recipient> <message text>
     list                              # list online users
     quit
+
+Security features:
+  - RSA-2048 keys for digital signatures (RSA-PSS)
+  - X25519 keys for Diffie-Hellman key exchange (forward secrecy)
+  - Per-message ephemeral keys (generated in message_builder)
+  - Sequence numbers for replay protection
 """
 
 import asyncio
@@ -25,6 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from crypto.keys import (
     generate_rsa_keypair, save_private_key, save_public_key,
     load_private_key, load_public_key, serialize_public_key, deserialize_public_key,
+    generate_x25519_keypair, save_x25519_private, save_x25519_public,
+    load_x25519_private, load_x25519_public,
+    serialize_x25519_public, deserialize_x25519_public,
 )
 from client.message_builder import build_encrypted_message
 from client.message_reader import read_encrypted_message
@@ -38,11 +47,16 @@ class SecureClient:
     def __init__(self, username: str, keys_dir: str):
         self.username = username
         self.keys_dir = Path(keys_dir)
+        # RSA keys (for signing/verification)
         self.private_key = None
         self.public_key = None
+        # X25519 keys (for DH key exchange — long-term identity keys)
+        self.x25519_private = None
+        self.x25519_public = None
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
-        # Cache of public keys fetched from server: username -> public_key object
+        # Cache of public keys fetched from server
+        # username -> {"rsa": rsa_public_key, "x25519": x25519_public_key}
         self._key_cache: dict = {}
         self._pending_key_requests: dict[str, asyncio.Future] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -50,21 +64,38 @@ class SecureClient:
     # ── Key management ────────────────────────────────────────────────────────
 
     def setup_keys(self):
-        """Load existing keys or generate new ones."""
+        """Load existing keys or generate new ones (both RSA and X25519)."""
         self.keys_dir.mkdir(parents=True, exist_ok=True)
-        priv_path = self.keys_dir / "private.pem"
-        pub_path = self.keys_dir / "public.pem"
 
-        if priv_path.exists() and pub_path.exists():
-            print(f"[KEY] Loaded existing keys from {self.keys_dir}")
-            self.private_key = load_private_key(str(priv_path))
-            self.public_key = load_public_key(str(pub_path))
+        # RSA keys (signing)
+        rsa_priv_path = self.keys_dir / "private.pem"
+        rsa_pub_path = self.keys_dir / "public.pem"
+
+        if rsa_priv_path.exists() and rsa_pub_path.exists():
+            print(f"[KEY] Loaded existing RSA keys from {self.keys_dir}")
+            self.private_key = load_private_key(str(rsa_priv_path))
+            self.public_key = load_public_key(str(rsa_pub_path))
         else:
             print(f"[KEY] Generating new RSA-2048 key pair → {self.keys_dir}")
             self.private_key, self.public_key = generate_rsa_keypair()
-            save_private_key(self.private_key, str(priv_path))
-            save_public_key(self.public_key, str(pub_path))
-            print("[KEY] Keys saved.")
+            save_private_key(self.private_key, str(rsa_priv_path))
+            save_public_key(self.public_key, str(rsa_pub_path))
+
+        # X25519 keys (DH key exchange)
+        x25519_priv_path = self.keys_dir / "x25519_private.pem"
+        x25519_pub_path = self.keys_dir / "x25519_public.pem"
+
+        if x25519_priv_path.exists() and x25519_pub_path.exists():
+            print(f"[KEY] Loaded existing X25519 keys from {self.keys_dir}")
+            self.x25519_private = load_x25519_private(str(x25519_priv_path))
+            self.x25519_public = load_x25519_public(str(x25519_pub_path))
+        else:
+            print(f"[KEY] Generating new X25519 key pair → {self.keys_dir}")
+            self.x25519_private, self.x25519_public = generate_x25519_keypair()
+            save_x25519_private(self.x25519_private, str(x25519_priv_path))
+            save_x25519_public(self.x25519_public, str(x25519_pub_path))
+
+        print("[KEY] Keys saved.")
 
     # ── Networking ────────────────────────────────────────────────────────────
 
@@ -78,15 +109,17 @@ class SecureClient:
         await self.writer.drain()
 
     async def register(self):
-        pub_pem = serialize_public_key(self.public_key).decode("utf-8")
+        rsa_pub_pem = serialize_public_key(self.public_key).decode("utf-8")
+        x25519_pub_pem = serialize_x25519_public(self.x25519_public).decode("utf-8")
         await self.send_frame({
             "type": "REGISTER",
             "username": self.username,
-            "public_key_pem": pub_pem,
+            "public_key_pem": rsa_pub_pem,
+            "x25519_public_key_pem": x25519_pub_pem,
         })
 
     async def fetch_public_key(self, username: str):
-        """Request a user's public key from the server. Returns key object."""
+        """Request a user's public keys from the server. Returns key dict."""
         if username in self._key_cache:
             return self._key_cache[username]
         fut = self._loop.create_future()
@@ -102,9 +135,10 @@ class SecureClient:
     async def send_message(self, recipient: str, plaintext: str):
         print(f"\n[→] Preparing message to '{recipient}'...")
 
-        # Get recipient's public key
+        # Get recipient's public keys (RSA for sig verification, X25519 for DH)
         try:
-            recipient_pub = await self.fetch_public_key(recipient)
+            keys = await self.fetch_public_key(recipient)
+            recipient_x25519_pub = keys["x25519"]
         except Exception as exc:
             print(f"[ERROR] Could not get public key for '{recipient}': {exc}")
             return
@@ -113,8 +147,8 @@ class SecureClient:
             plaintext=plaintext,
             sender=self.username,
             receiver=recipient,
-            sender_private_key=self.private_key,
-            receiver_public_key=recipient_pub,
+            sender_private_key=self.private_key,          # RSA (for signing)
+            receiver_public_key=recipient_x25519_pub,     # X25519 (for DH)
         )
 
         await self.send_frame({
@@ -144,11 +178,17 @@ class SecureClient:
 
                 elif ftype == "KEY_RESPONSE":
                     uname = frame["username"]
-                    pub_key = deserialize_public_key(frame["public_key_pem"].encode())
-                    self._key_cache[uname] = pub_key
+                    rsa_pub = deserialize_public_key(frame["public_key_pem"].encode())
+                    x25519_pub = deserialize_x25519_public(
+                        frame.get("x25519_public_key_pem", "").encode()
+                    )
+                    self._key_cache[uname] = {
+                        "rsa": rsa_pub,
+                        "x25519": x25519_pub,
+                    }
                     fut = self._pending_key_requests.pop(uname, None)
                     if fut and not fut.done():
-                        fut.set_result(pub_key)
+                        fut.set_result(self._key_cache[uname])
 
                 elif ftype == "USER_LIST":
                     users = frame.get("users", [])
@@ -157,8 +197,6 @@ class SecureClient:
                 elif ftype == "DELIVER":
                     from_user = frame.get("from", "?")
                     message = frame.get("message", {})
-                    # Dispatch to a separate task so the receive loop stays free
-                    # to process the KEY_RESPONSE that _handle_delivery will need.
                     asyncio.create_task(self._handle_delivery(from_user, message))
 
 
@@ -222,9 +260,10 @@ class SecureClient:
         print(f"  INCOMING MESSAGE from '{from_user}'")
         print(f"{'='*65}")
 
-        # Fetch sender's public key (may require a network round-trip to server)
+        # Fetch sender's RSA public key for signature verification
         try:
-            sender_pub = await self.fetch_public_key(from_user)
+            keys = await self.fetch_public_key(from_user)
+            sender_rsa_pub = keys["rsa"]
         except Exception as exc:
             print(f"  [!] Cannot verify — could not get public key for '{from_user}': {exc}")
             print(f"{'='*65}\n")
@@ -233,13 +272,16 @@ class SecureClient:
         try:
             plaintext = read_encrypted_message(
                 message=message,
-                receiver_private_key=self.private_key,
-                sender_public_key=sender_pub,
+                receiver_private_key=self.x25519_private,  # X25519 (for DH)
+                sender_public_key=sender_rsa_pub,          # RSA (for sig verify)
             )
             print(f"\n  ► Reconstructed message: {plaintext!r}")
             print(f"{'='*65}\n")
         except InvalidSignature:
             print("  [SECURITY] Message REJECTED -- invalid signature!")
+            print(f"{'='*65}\n")
+        except ValueError as exc:
+            print(f"  [SECURITY] Message REJECTED -- {exc}")
             print(f"{'='*65}\n")
         except Exception as exc:
             print(f"  [ERROR] Decryption failed: {exc}")

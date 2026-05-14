@@ -1,8 +1,14 @@
 """
 utils/serializer.py — JSON message frame construction and parsing.
 
-All binary fields (ciphertext, nonce, tag, wrapped keys, signature) are stored
-as standard base64 strings inside JSON so the protocol stays human-readable.
+All binary fields (ciphertext, nonce, tag, wrapped keys, signature, ephemeral
+public key) are stored as standard base64 strings inside JSON so the protocol
+stays human-readable.
+
+Updated to support:
+  - ephemeral_public_key field (forward secrecy via X25519)
+  - sequence_number in metadata (replay protection)
+  - canonical serialization includes both new fields for signature binding
 """
 
 import json
@@ -26,6 +32,7 @@ def build_message(
     components: list[dict],
     encrypted_keys: dict[str, str],
     signature: bytes,
+    ephemeral_public_key: str = "",
 ) -> dict:
     """
     Assemble the final message dict ready for JSON serialisation.
@@ -34,6 +41,9 @@ def build_message(
         seq, type, ciphertext (bytes), nonce (bytes), tag (bytes)
 
     encrypted_keys: dict mapping type → wrapped_key (bytes)
+        (empty dict when using forward secrecy — keys are HKDF-derived)
+
+    ephemeral_public_key: base64-encoded X25519 public key (forward secrecy)
     """
     enc_components = []
     for c in components:
@@ -47,19 +57,30 @@ def build_message(
 
     enc_keys = {k: b64e(v) for k, v in encrypted_keys.items()}
 
-    return {
+    msg = {
         "metadata": metadata,
         "components": enc_components,
         "encrypted_keys": enc_keys,
         "signature": b64e(signature),
     }
 
+    # Add ephemeral public key if provided (forward secrecy mode)
+    if ephemeral_public_key:
+        msg["ephemeral_public_key"] = ephemeral_public_key
+
+    return msg
+
 
 def canonical_bytes(message: dict, exclude_signature: bool = True) -> bytes:
     """
     Return the canonical JSON bytes of *message* used for signing/verification.
+
     The signature field is excluded before signing (it doesn't exist yet at sign
     time, and must be excluded at verify time to reproduce the same bytes).
+
+    IMPORTANT: The canonical form INCLUDES ephemeral_public_key and
+    metadata.sequence_number — both are signature-bound to prevent
+    substitution and replay attacks.
     """
     if exclude_signature:
         payload = {k: v for k, v in message.items() if k != "signature"}
@@ -85,9 +106,9 @@ def parse_message(message: dict) -> tuple[dict, list[dict], dict[str, bytes], by
     Decode base64 fields back to bytes.
 
     Returns:
-        metadata: dict
+        metadata: dict (includes sequence_number if present)
         components: list of dicts with bytes fields
-        encrypted_keys: dict mapping type → wrapped_key bytes
+        encrypted_keys: dict mapping type → wrapped_key bytes (may be empty)
         signature: bytes
     """
     metadata = message["metadata"]
@@ -103,6 +124,6 @@ def parse_message(message: dict) -> tuple[dict, list[dict], dict[str, bytes], by
             "tag": b64d(c["tag"]),
         })
 
-    encrypted_keys = {k: b64d(v) for k, v in message["encrypted_keys"].items()}
+    encrypted_keys = {k: b64d(v) for k, v in message.get("encrypted_keys", {}).items()}
 
     return metadata, components, encrypted_keys, signature
