@@ -1,0 +1,41 @@
+name: CI & Docker Build Check
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies & SpaCy model
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Run cryptographic integrity demos
+        run: |
+          python demos/demo_normal.py
+          python demos/demo_forward_secrecy.py
+          python demos/demo_replay.py
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: cn-secure:latest

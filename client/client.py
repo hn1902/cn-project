@@ -18,6 +18,7 @@ Security features:
 
 import asyncio
 import json
+import os
 import sys
 import argparse
 import threading
@@ -39,14 +40,16 @@ from client.message_builder import build_encrypted_message
 from client.message_reader import read_encrypted_message
 from cryptography.exceptions import InvalidSignature
 
-HOST = "127.0.0.1"
-PORT = 9999
+HOST = os.environ.get("RELAY_HOST", "127.0.0.1")
+PORT = int(os.environ.get("RELAY_PORT", 9999))
 
 
 class SecureClient:
-    def __init__(self, username: str, keys_dir: str):
+    def __init__(self, username: str, keys_dir: str, host: str | None = None, port: int | None = None):
         self.username = username
         self.keys_dir = Path(keys_dir)
+        self.host = host or HOST
+        self.port = port or PORT
         # RSA keys (for signing/verification)
         self.private_key = None
         self.public_key = None
@@ -100,8 +103,8 @@ class SecureClient:
     # ── Networking ────────────────────────────────────────────────────────────
 
     async def connect(self):
-        self.reader, self.writer = await asyncio.open_connection(HOST, PORT)
-        print(f"[NET] Connected to {HOST}:{PORT}")
+        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+        print(f"[NET] Connected to {self.host}:{self.port}")
 
     async def send_frame(self, frame: dict):
         data = json.dumps(frame, separators=(",", ":")) + "\n"
@@ -324,10 +327,12 @@ def main():
     parser = argparse.ArgumentParser(description="Secure E2E Encrypted Messenger")
     parser.add_argument("--user", required=True, help="Username to register as")
     parser.add_argument("--keys-dir", default=None, help="Directory for key files")
+    parser.add_argument("--host", default=None, help="Relay server host")
+    parser.add_argument("--port", type=int, default=None, help="Relay server port")
     args = parser.parse_args()
 
     keys_dir = args.keys_dir or f"keys/{args.user}"
-    client = SecureClient(username=args.user, keys_dir=keys_dir)
+    client = SecureClient(username=args.user, keys_dir=keys_dir, host=args.host, port=args.port)
     asyncio.run(client.run())
 
 

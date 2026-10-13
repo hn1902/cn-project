@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: cn-secure-messenger
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: RELAY_HOST
+        value: 127.0.0.1
+      - key: RELAY_PORT
+        value: 9999

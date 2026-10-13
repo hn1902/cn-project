@@ -24,9 +24,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-async def root():
-    return {"status": "Bridge is running", "ports": {"relay": 9999, "websocket": 8000}}
+RELAY_HOST = os.environ.get("RELAY_HOST", "127.0.0.1")
+RELAY_PORT = int(os.environ.get("RELAY_PORT", 9999))
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "relay_host": RELAY_HOST, "relay_port": RELAY_PORT}
 
 # Active clients: websocket_id -> SecureClient
 # For simplicity, we'll use a local SecureClient instance per WebSocket connection.
@@ -34,7 +37,12 @@ class BridgeConnection:
     def __init__(self, username: str, websocket: WebSocket):
         self.username = username
         self.websocket = websocket
-        self.client = SecureClient(username=username, keys_dir=f"keys/{username}")
+        self.client = SecureClient(
+            username=username,
+            keys_dir=f"keys/{username}",
+            host=RELAY_HOST,
+            port=RELAY_PORT,
+        )
         self.task = None
 
     async def start(self):
@@ -172,6 +180,21 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
     finally:
         await conn.stop()
 
+# Mount frontend production build if available
+dist_path = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+if dist_path.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="frontend")
+else:
+    @app.get("/")
+    async def root():
+        return {
+            "status": "Bridge is running",
+            "ports": {"relay": RELAY_PORT, "websocket": 8000},
+            "frontend": "Not built yet. Run 'npm run build' inside frontend/"
+        }
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    bridge_port = int(os.environ.get("PORT", os.environ.get("BRIDGE_PORT", 8000)))
+    uvicorn.run(app, host="0.0.0.0", port=bridge_port)

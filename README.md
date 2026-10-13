@@ -223,3 +223,37 @@ The sequence number is covered by the RSA-PSS signature, so an attacker **cannot
 - ❌ Compromised private keys — no revocation mechanism
 - ❌ Endpoint malware — application-layer security only
 - ❌ Metadata leakage — sender, receiver, timestamp, and sequence are visible
+
+## Deployment Guide
+
+### Option 1: Docker / Docker Compose (Recommended)
+
+To build and start the entire stack (TCP Relay + WebSocket Bridge + Web UI):
+
+```bash
+docker compose up --build
+```
+
+- **Web UI & WebSocket Gateway**: `http://localhost:8000`
+- **TCP Relay Server**: `localhost:9999`
+- User keys are automatically persisted in a named Docker volume `user_keys`.
+
+### Option 2: Cloud Deployment (Render / Railway / Fly.io)
+
+This repository includes a production multi-stage [Dockerfile](file:///C:/Users/Hayag/.gemini/antigravity/scratch/cn-project/Dockerfile) and [render.yaml](file:///C:/Users/Hayag/.gemini/antigravity/scratch/cn-project/render.yaml).
+
+- **Render.com**: Connect the GitHub repository and create a "Web Service" from Docker, or use the Blueprint via `render.yaml`.
+- **Railway.app**: Deploy directly from repo using Dockerfile.
+- **Fly.io**: Run `fly launch` and `fly deploy`.
+
+Both the TCP relay and the WebSocket gateway run internally within the container, exposing the HTTP & WebSocket endpoints cleanly on the assigned cloud `$PORT`.
+
+### Option 3: Local One-Command Runner
+
+Run both backend relay and bridge (serving the built frontend):
+
+```bash
+python start_stack.py
+```
+
+Then navigate to `http://localhost:8000` in your web browser.

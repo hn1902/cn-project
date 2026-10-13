@@ -1,0 +1,19 @@
+services:
+  cn-secure:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cn-secure-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "9999:9999"
+    environment:
+      - RELAY_HOST=0.0.0.0
+      - RELAY_PORT=9999
+      - BRIDGE_PORT=8000
+    volumes:
+      - user_keys:/app/keys
+
+volumes:
+  user_keys:

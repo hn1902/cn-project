@@ -2,7 +2,18 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Send, User, Users, Shield, LogOut, ChevronRight, MessageCircle } from 'lucide-react';
 import './index.css';
 
-const WS_BASE_URL = 'ws://localhost:8000/ws';
+const getWsUrl = () => {
+  if (import.meta.env.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL;
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (window.location.port === '5173') {
+    return 'ws://localhost:8000/ws';
+  }
+  return `${proto}//${window.location.host}/ws`;
+};
+
+const WS_BASE_URL = getWsUrl();
 
 function App() {
   const [username, setUsername] = useState('');
